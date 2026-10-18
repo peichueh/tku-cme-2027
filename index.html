@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>2027研討會論文評分系統</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Vue 3 -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <!-- SheetJS (用來解析 .xlsx 檔案) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+  <style>
+    body { -webkit-tap-highlight-color: transparent; }
+    input[type=range]::-webkit-slider-thumb {
+      height: 22px; width: 22px; border-radius: 50%;
+      background: #4f46e5; cursor: pointer; -webkit-appearance: none;
+      box-shadow: 0 2px 6px rgba(79, 70, 229, 0.4);
+    }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans antialiased">
+  <div id="app" class="min-h-screen flex flex-col">
+
+    <!-- 頂部導覽列 -->
+    <header class="bg-slate-900 text-white px-4 py-2.5 flex justify-between items-center shadow-md">
+      <div class="flex items-center space-x-2">
+        <span class="font-black text-sm tracking-wider text-indigo-400">SEMINAR-2027</span>
+        <span v-if="isGlobalLocked" class="text-[10px] bg-rose-600 px-2 py-0.5 rounded-full font-bold">評分已鎖定</span>
+        <span class="text-[10px] bg-emerald-600 px-2 py-0.5 rounded-full font-bold">雲端同步中</span>
+      </div>
+      <div class="flex items-center space-x-2 text-xs">
+        <button @click="forceResetCache" class="bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 px-2 py-1 rounded text-[11px]">
+          🧹 清除快取還原
+        </button>
+        <template v-if="currentUser">
+          <span class="text-slate-300 hidden sm:inline">{{ currentUser.display }}</span>
+          <button @click="logout" class="bg-rose-900/60 hover:bg-rose-800 text-rose-200 px-2 py-1 rounded">登出</button>
+        </template>
+      </div>
+    </header>
+
+    <!-- ========================================== -->
+    <!-- 1. 登入介面 (未登入) -->
+    <!-- ========================================== -->
+    <main v-if="!currentUser" class="flex-1 flex items-center justify-center p-4">
+      <div class="bg-white max-w-md w-full rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+        <div class="grid grid-cols-3 bg-slate-50 border-b border-slate-200 text-xs font-bold text-center">
+          <button @click="loginTab = 'judge'" :class="loginTab === 'judge' ? 'bg-white text-indigo-600 border-b-2 border-indigo-600 py-3' : 'text-slate-500 py-3'">評審登入</button>
+          <button @click="loginTab = 'admin'" :class="loginTab === 'admin' ? 'bg-white text-indigo-600 border-b-2 border-indigo-600 py-3' : 'text-slate-500 py-3'">大會管理員</button>
+          <button @click="loginTab = 'student'" :class="loginTab === 'student' ? 'bg-white text-indigo-600 border-b-2 border-indigo-600 py-3' : 'text-slate-500 py-3'">學生查分</button>
+        </div>
+
+        <div class="p-6">
+          <!-- 評審登入 -->
+          <div v-if="loginTab === 'judge'" class="space-y-4">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">評審人員代號</label>
+              <input v-model="judgeCodeInput" type="text" placeholder="例如: J01 或 J02" class="w-full text-sm p-2.5 border rounded-lg outline-none focus:border-indigo-600">
+              <div class="mt-1.5 flex flex-wrap gap-1">
+                <span class="text-[11px] text-slate-400">目前可登入：</span>
+                <button v-for="j in judges.slice(0, 4)" :key="j.code" @click="judgeCodeInput = j.code; judgePassInput = j.password" class="text-[11px] text-indigo-600 underline mr-1">{{ j.code }}</button>
+              </div>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">密碼</label>
+              <input v-model="judgePassInput" type="password" class="w-full text-sm p-2.5 border rounded-lg outline-none focus:border-indigo-600">
+            </div>
+            <button @click="doJudgeLogin" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-sm shadow">進入評審端</button>
+          </div>
+
+          <!-- 管理員登入 -->
+          <div v-if="loginTab === 'admin'" class="space-y-4">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">管理員通行密鑰</label>
+              <input v-model="adminKeyInput" type="password" placeholder="admin2027" class="w-full text-sm p-2.5 border rounded-lg outline-none focus:border-indigo-600">
+              <button @click="adminKeyInput = 'admin2027'" class="text-[11px] text-indigo-600 underline mt-1.5 inline-block">快速填入 (admin2027)</button>
+            </div>
+            <button @click="doAdminLogin" class="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg text-sm shadow">進入主控台</button>
+          </div>
+
+          <!-- 學生查分 -->
+          <div v-if="loginTab === 'student'" class="space-y-4">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">發表學號 (ID)</label>
+              <input v-model="studentIdInput" type="text" placeholder="例如: M1120901" class="w-full text-sm p-2.5 border rounded-lg outline-none focus:border-indigo-600">
+              <div class="mt-1.5 flex flex-wrap gap-1">
+                <span class="text-[11px] text-slate-400">快速選擇：</span>
+                <button v-for="p in presentations.slice(0, 3)" :key="p.studentId" @click="studentIdInput = p.studentId" class="text-[11px] text-indigo-600 underline mr-1">{{ p.studentId }}</button>
+              </div>
+            </div>
+            <button @click="doStudentLogin" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-sm shadow">查詢個人成績</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- ========================================== -->
+    <!-- 2. 評審手機端評分 -->
+    <!-- ========================================== -->
+    <main v-else-if="currentUser.role === 'judge'" class="max-w-md mx-auto w-full flex-1 flex flex-col bg-slate-50 pb-28 shadow-xl">
+      <div class="bg-indigo-900 text-white px-4 py-3 sticky top-0 z-30 shadow">
+        <div class="flex justify-between items-center mb-2">
+          <div class="text-xs text-indigo-200">
+            評審委員：<span class="font-bold text-white">{{ currentJudge?.name }}</span>
+            <span class="ml-1 bg-indigo-800 px-2 py-0.5 rounded text-[10px]">場次 {{ currentJudge?.session }}</span>
+          </div>
+          <span class="text-xs text-indigo-300">待評：{{ assignedPresentations.length }} 位</span>
+        </div>
+
+        <div v-if="assignedPresentations.length > 0" class="flex items-center justify-between bg-indigo-800/80 p-2 rounded-lg">
+          <div class="text-xs">
+            <div class="font-mono font-bold text-amber-300 text-sm">{{ activePresentation?.studentId }} {{ activePresentation?.studentName }}</div>
+            <div class="text-slate-300 text-[11px] truncate w-48">{{ activePresentation?.title }}</div>
+          </div>
+          <select v-model="selectedPresId" class="bg-indigo-950 text-white text-xs rounded px-2 py-1.5 border border-indigo-700 outline-none">
+            <option v-for="p in assignedPresentations" :key="p.id" :value="p.id">
+              {{ p.studentId }} {{ p.studentName }}
+            </option>
+          </select>
+        </div>
+        <div v-else class="text-xs text-amber-300 bg-indigo-950 p-2 rounded">
+          ⚠️ 本場次 ({{ currentJudge?.session }}) 目前尚未指派任何發表學生。
+        </div>
+      </div>
+
+      <div v-if="activePresentation">
+        <!-- 加權得分即時列 -->
+        <div class="bg-indigo-50 border-b border-indigo-100 px-4 py-2 flex justify-between items-center">
+          <div>
+            <span class="text-xs font-bold text-indigo-950">
+              {{ activePresentation.type === 'ORAL' ? '口頭報告 (專業70% / 技術30%)' : '海報競賽 (研究60% / 設計20% / 應答20%)' }}
+            </span>
+            <div class="text-[10px] text-indigo-600">指導教授：{{ activePresentation.advisor }}</div>
+          </div>
+          <div class="text-right">
+            <span class="text-[10px] text-slate-500 block leading-tight">目前加權總分</span>
+            <span class="text-2xl font-black text-indigo-700 font-mono">{{ calcTotalScore }}</span>
+          </div>
+        </div>
+
+        <!-- 利益迴避檢核 -->
+        <div v-if="isConflictOfInterest" class="m-3 p-4 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs leading-relaxed">
+          ⚠️ <strong>利益迴避鎖定</strong>：您為該發表學生之指導教授（{{ activePresentation.advisor }}），依學術競賽規程，系統已自動鎖定評分欄位，不計入成績。
+        </div>
+
+        <!-- 評分內容 -->
+        <div v-else class="p-3 space-y-3 flex-1 overflow-y-auto">
+          <!-- 分數滑桿 -->
+          <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm">
+            <div v-if="activePresentation.type === 'ORAL'" class="space-y-4">
+              <div>
+                <div class="flex justify-between text-xs font-semibold mb-1">
+                  <span>原始分A：專業性評分 (佔 70%)</span>
+                  <span class="text-indigo-600 font-bold font-mono">{{ scoreForm.score_a }} 分</span>
+                </div>
+                <p class="text-[10px] text-slate-400 mb-1.5">包含：報告內容、報告流暢度、提問詮釋</p>
+                <input type="range" min="50" max="100" v-model.number="scoreForm.score_a" class="w-full h-1.5 bg-slate-200 rounded-lg outline-none" />
+              </div>
+              <div class="pt-3 border-t border-slate-100">
+                <div class="flex justify-between text-xs font-semibold mb-1">
+                  <span>原始分B：技術性評分 (佔 30%)</span>
+                  <span class="text-indigo-600 font-bold font-mono">{{ scoreForm.score_b }} 分</span>
+                </div>
+                <p class="text-[10px] text-slate-400 mb-1.5">包含：時間控制、服裝儀容</p>
+                <input type="range" min="50" max="100" v-model.number="scoreForm.score_b" class="w-full h-1.5 bg-slate-200 rounded-lg outline-none" />
+              </div>
+            </div>
+            <div v-else class="space-y-4">
+              <div>
+                <div class="flex justify-between text-xs font-semibold mb-1">
+                  <span>原始分A：研究內容 (佔 60%)</span>
+                  <span class="text-indigo-600 font-bold font-mono">{{ scoreForm.score_a }} 分</span>
+                </div>
+                <input type="range" min="50" max="100" v-model.number="scoreForm.score_a" class="w-full h-1.5 bg-slate-200 rounded-lg outline-none" />
+              </div>
+              <div class="pt-3 border-t border-slate-100">
+                <div class="flex justify-between text-xs font-semibold mb-1">
+                  <span>原始分B：海報整體設計 (佔 20%)</span>
+                  <span class="text-indigo-600 font-bold font-mono">{{ scoreForm.score_b }} 分</span>
+                </div>
+                <input type="range" min="50" max="100" v-model.number="scoreForm.score_b" class="w-full h-1.5 bg-slate-200 rounded-lg outline-none" />
+              </div>
+              <div class="pt-3 border-t border-slate-100">
+                <div class="flex justify-between text-xs font-semibold mb-1">
+                  <span>原始分C：現場應答表現 (佔 20%)</span>
+                  <span class="text-indigo-600 font-bold font-mono">{{ scoreForm.score_c }} 分</span>
+                </div>
+                <input type="range" min="50" max="100" v-model.number="scoreForm.score_c" class="w-full h-1.5 bg-slate-200 rounded-lg outline-none" />
+              </div>
+            </div>
+          </div>
+
+          <!-- 評語庫標籤 -->
+          <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm space-y-3">
+            <div class="flex justify-between items-center border-b border-slate-100 pb-2">
+              <h3 class="text-xs font-bold text-slate-800 flex items-center">
+                <span class="w-1.5 h-3.5 bg-indigo-600 rounded mr-1.5"></span>
+                標準評語快捷標籤庫
+              </h3>
+              <span class="text-[10px] text-slate-400">已選 {{ scoreForm.tags.length }} 項</span>
+            </div>
+
+            <div v-for="grp in currentCommentsGrouped" :key="grp.title" class="space-y-1.5">
+              <div class="text-[11px] font-bold text-slate-600 bg-slate-50 px-2 py-1 rounded">
+                {{ grp.title }}
+              </div>
+              <div class="flex flex-wrap gap-1.5 pt-0.5">
+                <button 
+                  v-for="item in grp.items" 
+                  :key="item.text"
+                  type="button"
+                  @click="toggleTag(item.text)"
+                  :class="scoreForm.tags.includes(item.text) 
+                    ? (item.type === '優點' ? 'bg-emerald-600 text-white font-bold' : 'bg-rose-600 text-white font-bold')
+                    : (item.type === '優點' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-rose-50 text-rose-800 border-rose-200')"
+                  class="text-[11px] px-2.5 py-1 rounded-full border transition active:scale-95 text-left leading-tight">
+                  <span class="font-mono mr-0.5">{{ item.type === '優點' ? '✓' : '△' }}</span>
+                  {{ item.text }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 質性評語 -->
+          <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm">
+            <h3 class="text-xs font-bold text-slate-700 mb-1.5">補充質性意見</h3>
+            <textarea v-model="scoreForm.comment" rows="2" placeholder="請輸入給予學生的改進建議..." class="w-full text-xs p-2 rounded-lg border border-slate-200 outline-none"></textarea>
+          </div>
+        </div>
+
+        <!-- 提交按鈕 -->
+        <div v-if="!isConflictOfInterest" class="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-slate-200 p-2.5 flex gap-2 shadow-2xl">
+          <button @click="saveScore('DRAFT')" :disabled="isGlobalLocked" class="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg text-xs disabled:opacity-50">暫存草稿</button>
+          <button @click="saveScore('SUBMITTED')" :disabled="isGlobalLocked" class="flex-[2] py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-xs shadow-md disabled:opacity-50">正式送出 (上傳雲端)</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- ========================================== -->
+    <!-- 3. 管理員主控台 (支援 Excel 直接上傳) -->
+    <!-- ========================================== -->
+    <main v-else-if="currentUser.role === 'admin'" class="max-w-6xl mx-auto w-full p-4 md:p-6 flex-1 space-y-6">
+      <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+        <div>
+          <h1 class="text-lg font-black text-slate-800">大會評分與即時排名管理中心</h1>
+          <p class="text-xs text-slate-500 mt-1">即時同步 Firestore 雲端紀錄；每位學生取 2 位評審算術平均，同分自動比序核心指標得分。</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button @click="toggleGlobalLock" :class="isGlobalLocked ? 'bg-amber-600' : 'bg-rose-600'" class="text-xs font-bold text-white px-3.5 py-2 rounded-lg transition shadow">
+            {{ isGlobalLocked ? '🔓 解除全場鎖定' : '🔒 一鍵結算鎖定' }}
+          </button>
+          <button @click="exportCSV" class="text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-lg transition shadow">
+            匯出 Excel/CSV
+          </button>
+          <button @click="resetAllSubmissions" class="text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200 px-3.5 py-2 rounded-lg transition">
+            重置所有評分
+          </button>
+        </div>
+      </div>
+
+      <!-- 📂 檔案上傳區塊 (支援 .xlsx / .xls) -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
+        <div class="flex border-b border-slate-200 gap-4 text-xs font-bold">
+          <button @click="importTab = 'judges'" :class="importTab === 'judges' ? 'text-indigo-600 border-b-2 border-indigo-600 pb-2' : 'text-slate-400 pb-2'">1. 上傳《評審名單.xlsx》 (現有 {{ judges.length }}位)</button>
+          <button @click="importTab = 'students'" :class="importTab === 'students' ? 'text-indigo-600 border-b-2 border-indigo-600 pb-2' : 'text-slate-400 pb-2'">2. 上傳《學生名單.xlsx》 (現有 {{ presentations.length }}位)</button>
+        </div>
+
+        <!-- 評審 Excel 上傳 -->
+        <div v-if="importTab === 'judges'" class="space-y-3">
+          <div class="text-xs text-slate-500">
+            請選取《系統上傳_評審.xlsx》，系統將自動辨識欄位：<strong>場次、評審姓名、評審人員代號</strong>（密碼預設 1234）。
+          </div>
+          <div class="flex items-center gap-3">
+            <input type="file" accept=".xlsx, .xls" @change="handleJudgesExcelUpload" class="text-xs file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer">
+            <span v-if="isUploading" class="text-xs text-indigo-600 font-bold">正在解析並同步至 Firebase 雲端...</span>
+          </div>
+        </div>
+
+        <!-- 學生 Excel 上傳 -->
+        <div v-if="importTab === 'students'" class="space-y-3">
+          <div class="text-xs text-slate-500">
+            請選取《系統上傳_學生名單.xlsx》，系統將自動辨識欄位：<strong>學號 (ID)、學生姓名、指導教授、論文題目、場次</strong>。
+          </div>
+          <div class="flex items-center gap-3">
+            <input type="file" accept=".xlsx, .xls" @change="handleStudentsExcelUpload" class="text-xs file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer">
+            <span v-if="isUploading" class="text-xs text-indigo-600 font-bold">正在解析並同步至 Firebase 雲端...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 即時總榜 -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div class="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+          <h2 class="text-sm font-bold text-slate-700">全場即時總榜</h2>
+          <span class="text-xs text-slate-500">2位評審平均計分</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs border-collapse font-mono">
+            <thead class="bg-slate-100 text-slate-600 font-bold border-b border-slate-200 font-sans">
+              <tr>
+                <th class="py-3 px-3 text-center">名次</th>
+                <th class="py-3 px-3">場次</th>
+                <th class="py-3 px-3">學號 (ID)</th>
+                <th class="py-3 px-3">學生姓名 / 指導教授</th>
+                <th class="py-3 px-4">論文題目</th>
+                <th class="py-3 px-2 text-center">形式</th>
+                <th class="py-3 px-3 text-center">進度</th>
+                <th class="py-3 px-3 text-right">加權平均總分</th>
+                <th class="py-3 px-3 text-right">核心指標分</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <tr v-for="item in rankedList" :key="item.id" class="hover:bg-slate-50">
+                <td class="py-3 px-3 text-center font-black">
+                  <span :class="item.rank === 1 ? 'bg-amber-400 text-amber-950' : 'bg-slate-100 text-slate-600'" class="inline-block w-6 h-6 leading-6 rounded-full text-xs">
+                    {{ item.rank }}
+                  </span>
+                </td>
+                <td class="py-3 px-3 font-sans font-bold">{{ item.session }}</td>
+                <td class="py-3 px-3 font-bold text-indigo-700">{{ item.studentId }}</td>
+                <td class="py-3 px-3 font-sans">
+                  <div class="font-bold text-slate-800">{{ item.studentName }}</div>
+                  <div class="text-[10px] text-slate-400">指導：{{ item.advisor }}</div>
+                </td>
+                <td class="py-3 px-4 font-sans text-slate-600 max-w-xs truncate">{{ item.title }}</td>
+                <td class="py-3 px-2 text-center font-sans">
+                  <span class="px-2 py-0.5 rounded text-[10px] border bg-blue-50 text-blue-700">{{ item.type }}</span>
+                </td>
+                <td class="py-3 px-3 text-center font-sans">
+                  <span :class="item.completedJudges === 2 ? 'text-emerald-600 font-bold' : 'text-amber-500'">
+                    {{ item.completedJudges }} / 2 完成
+                  </span>
+                </td>
+                <td class="py-3 px-3 text-right font-black text-sm text-indigo-900">{{ item.finalAverageScore.toFixed(2) }}</td>
+                <td class="py-3 px-3 text-right text-xs text-slate-400">{{ item.coreScore.toFixed(2) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+
+    <!-- ========================================== -->
+    <!-- 4. 學生端匿名查分 -->
+    <!-- ========================================== -->
+    <main v-else-if="currentUser.role === 'student'" class="max-w-md mx-auto w-full p-4 flex-1">
+      <div v-if="studentResult" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+        <div class="border-b border-slate-100 pb-3 flex justify-between items-start">
+          <div>
+            <span class="text-xs font-mono font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">{{ studentResult.studentId }}</span>
+            <span class="ml-2 text-xs text-slate-400">場次 {{ studentResult.session }}</span>
+            <h3 class="text-base font-bold text-slate-800 mt-1">{{ studentResult.studentName }} 同學</h3>
+            <p class="text-xs text-slate-500 mt-0.5 leading-snug">{{ studentResult.title }}</p>
+          </div>
+          <div class="text-right">
+            <span class="text-[10px] text-slate-400 block">目前場次名次</span>
+            <span class="text-2xl font-black text-amber-500 font-mono">第 {{ studentResult.rank }} 名</span>
+          </div>
+        </div>
+
+        <div class="bg-slate-50 p-4 rounded-xl flex justify-between items-center font-mono">
+          <span class="text-xs text-slate-600 font-sans">大會最終平均加權得分</span>
+          <span class="text-3xl font-black text-indigo-700">{{ studentResult.finalAverageScore.toFixed(2) }}</span>
+        </div>
+
+        <div>
+          <h4 class="text-xs font-bold text-slate-700 mb-2">委員整體質性回饋 (去識別化)</h4>
+          <div v-if="studentResult.evaluations.length === 0" class="text-xs text-slate-400 py-4 text-center bg-slate-50 rounded-xl">
+            評審委員尚未完成評分提交
+          </div>
+          <div v-else class="space-y-2.5">
+            <div v-for="(ev, idx) in studentResult.evaluations" :key="idx" class="p-3 bg-slate-50 rounded-xl border border-slate-100">
+              <div class="text-[11px] font-bold text-slate-500 mb-1.5">評審意見回饋 #{{ idx + 1 }}：</div>
+              <div class="flex flex-wrap gap-1 mb-2">
+                <span v-for="tag in ev.tags" :key="tag" class="text-[10px] px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 font-medium">
+                  {{ tag }}
+                </span>
+              </div>
+              <p class="text-xs text-slate-700 bg-white p-2.5 rounded border border-slate-200">
+                {{ ev.comment || '委員無額外補充評語。' }}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-else class="bg-white p-6 rounded-2xl shadow-sm text-center text-xs text-slate-400">
+        查無學號 {{ currentUser.id }} 的發表紀錄，請向大會工作人員確認。
+      </div>
+    </main>
+
+  </div>
+
+  <script>
+    const { createApp, ref, computed, reactive, watch, onMounted } = Vue;
+
+    // Firebase 專案金鑰
+    const firebaseConfig = {
+      apiKey: "AIzaSyDuFsI61WBQnVsJEKW37jH79R0jMkN-lX8",
+      authDomain: "cme-seminar2027.firebaseapp.com",
+      projectId: "cme-seminar2027",
+      storageBucket: "cme-seminar2027.firebasestorage.app",
+      messagingSenderId: "312956682159",
+      appId: "1:312956682159:web:2eef3914b4f8fd28f6795a"
+    };
+
+    let db = null;
+    try {
+      firebase.initializeApp(firebaseConfig);
+      db = firebase.firestore();
+    } catch (e) {
+      console.warn("Firebase 離線中");
+    }
+
+    createApp({
+      setup() {
+        const currentUser = ref(null);
+        const loginTab = ref('judge');
+        const judgeCodeInput = ref('J01');
+        const judgePassInput = ref('1234');
+        const adminKeyInput = ref('admin2027');
+        const studentIdInput = ref('M1120901');
+
+        const isGlobalLocked = ref(false);
+        const importTab = ref('judges');
+        const isUploading = ref(false);
+
+        // 預設名單
+        const defaultJudges = [
+          { id: 1, code: 'J01', name: '王講座教授', session: 'A1', password: '1234' },
+          { id: 2, code: 'J02', name: '林特聘教授', session: 'A1', password: '1234' },
+          { id: 3, code: 'J03', name: '陳副教授', session: 'A2', password: '1234' },
+          { id: 4, code: 'J04', name: '張助理教授', session: 'A2', password: '1234' }
+        ];
+
+        const defaultPresentations = [
+          { id: 1, studentId: 'M1120901', studentName: '陳同學', advisor: '張副教授', title: '基於邊緣計算之低延遲影像辨識系統', type: 'ORAL', session: 'A1' },
+          { id: 2, studentId: 'M1120902', studentName: '李同學', advisor: '王講座教授', title: '生醫論文大型語言模型探索', type: 'ORAL', session: 'A1' },
+          { id: 3, studentId: 'M1120903', studentName: '黃同學', advisor: '趙教授', title: '次世代固態電池微結構分析', type: 'POSTER', session: 'A2' }
+        ];
+
+        const readStorage = (key, fallback) => {
+          try {
+            const v = localStorage.getItem(key);
+            return v ? JSON.parse(v) : fallback;
+          } catch {
+            return fallback;
+          }
+        };
+
+        const judges = ref(readStorage('cme_j_2027', defaultJudges));
+        const presentations = ref(readStorage('cme_p_2027', defaultPresentations));
+        const selectedPresId = ref(presentations.value[0]?.id || 1);
+
+        // 口頭評語分組 (29條)
+        const oralCommentsGrouped = [
+          {
+            title: '專業性評分 - 報告內容',
+            items: [
+              { type: '優點', text: '架構完整，論述層次分明，展現高度專業。' },
+              { type: '優點', text: '邏輯推論嚴謹，研究數據具備說服力。' },
+              { type: '優點', text: '研究目標明確，核心價值敘述詳盡。' },
+              { type: '優點', text: '文獻引述精確，能有效支撐個人論點。' },
+              { type: '建議', text: '內容重心不夠聚焦，建議重新梳理研究動機。' },
+              { type: '建議', text: '投影片文字過於冗長，應多利用圖表呈現關鍵數據。' },
+              { type: '建議', text: '部分科學方法論述不足，建議加強實驗細節之說明。' },
+              { type: '建議', text: '結論與數據關聯性稍弱，建議強化論證過程。' }
+            ]
+          },
+          {
+            title: '專業性評分 - 報告流暢度',
+            items: [
+              { type: '優點', text: '口齒清晰、敘事自然流暢，極具感染力。' },
+              { type: '優點', text: '表現自信沉穩，能帶領聽眾掌握演講節奏。' },
+              { type: '優點', text: '對內容極度熟稔，展現優異的專業素養。' },
+              { type: '建議', text: '唸稿感較重，建議增加與觀眾的眼神互動。' },
+              { type: '建議', text: '說話語速偏快，建議適時停頓以利聽眾吸收。' },
+              { type: '建議', text: '表達稍顯生硬，建議加強各章節間的語意銜接。' }
+            ]
+          },
+          {
+            title: '專業性評分 - 提問詮釋',
+            items: [
+              { type: '優點', text: '答詢切中要領，對研究細節掌握度極高。' },
+              { type: '優點', text: '邏輯應變力強，能針對質疑給予科學性回覆。' },
+              { type: '優點', text: '態度謙和得體，能正面積極與委員討論。' },
+              { type: '建議', text: '回覆過於簡略，建議對問題核心進行深度論述。' },
+              { type: '建議', text: '答詢內容與研究方法未盡一致，應重新釐清觀念。' },
+              { type: '建議', text: '面對提問反應較慢，建議加強模擬訓練以提升應變。' }
+            ]
+          },
+          {
+            title: '技術性評分 - 時間控制',
+            items: [
+              { type: '優點', text: '發表節奏掌握完美，精確完成報告。' },
+              { type: '優點', text: '內容分配均衡，在時限內完整呈現研究精華。' },
+              { type: '建議', text: '發表超時，建議重新精簡簡報頁數與論述重點。' },
+              { type: '建議', text: '前言佔比過高，導致後段核心成果描述太匆促。' },
+              { type: '建議', text: '剩餘時間過多，建議增加對研究成果的深度解說。' }
+            ]
+          },
+          {
+            title: '技術性評分 - 服裝儀容',
+            items: [
+              { type: '優點', text: '服儀莊重得體，展現優良的專業形象。' },
+              { type: '優點', text: '舉止端莊大方，符合學術場合禮儀。' },
+              { type: '建議', text: '服裝建議可以更為正式，以增進整體專業感。' },
+              { type: '建議', text: '表情與肢體儀態略顯緊張，可透過多加練習提升自然度。' }
+            ]
+          }
+        ];
+
+        // 海報評語分組 (14條)
+        const posterCommentsGrouped = [
+          {
+            title: '研究內容',
+            items: [
+              { type: '優點', text: '海報內容豐富 (資訊量充實，能完整涵蓋研究脈絡)' },
+              { type: '優點', text: '數據表達詳細 (數據佐證詳盡，具備足夠科學說服力)' }
+            ]
+          },
+          {
+            title: '海報整體設計',
+            items: [
+              { type: '優點', text: '版面整齊有序 (排版架構嚴整，層次分明)' },
+              { type: '優點', text: '圖文比例得當 (圖表配置與文字說明平衡度佳)' },
+              { type: '優點', text: '視覺動線清晰 (閱讀動線引導良好，易於理解)' },
+              { type: '建議', text: '增強結論視覺對比 (可利用色塊或字體突顯研究結論)' },
+              { type: '建議', text: '強化遠距閱讀吸引力 (建議放大標題與圖表標示，提升遠觀吸睛度)' },
+              { type: '建議', text: '凸顯核心研究成果 (重點數據可進一步放大或做圖示化處理)' }
+            ]
+          },
+          {
+            title: '現場應答表現',
+            items: [
+              { type: '優點', text: '報告條理清晰 (口頭解說條理分明，引導流暢)' },
+              { type: '優點', text: '提問應答流暢 (面對詢問回答切中核心，對答得體)' },
+              { type: '優點', text: '內容講解透徹 (對專業機轉與研究細節掌握精準)' },
+              { type: '建議', text: '適度放鬆心情 (儀態略顯緊繃，可透過眼神互動放鬆情緒)' },
+              { type: '建議', text: '提高發表音量 (現場環境較吵雜，建議加大音量以利聽審)' },
+              { type: '建議', text: '加強台風自信口頭報告 (減少對海報的背誦感，展現研究者自信)' }
+            ]
+          }
+        ];
+
+        // 登入方法
+        const doJudgeLogin = () => {
+          const t = judges.value.find(j => j.code.toUpperCase() === judgeCodeInput.value.trim().toUpperCase());
+          if (!t || t.password !== judgePassInput.value) return alert('代號或密碼錯誤！');
+          currentUser.value = { role: 'judge', id: t.id, display: t.name, roleName: `評審 (${t.session}場)` };
+          const p = presentations.value.find(x => x.session === t.session);
+          if (p) selectedPresId.value = p.id;
+        };
+
+        const doAdminLogin = () => {
+          if (adminKeyInput.value !== 'admin2027') return alert('密鑰錯誤！');
+          currentUser.value = { role: 'admin', id: 'admin', display: '系統管理員', roleName: '總控台' };
+        };
+
+        const doStudentLogin = () => {
+          const t = presentations.value.find(p => p.studentId.toUpperCase() === studentIdInput.value.trim().toUpperCase());
+          if (!t) return alert('查無此學號！');
+          currentUser.value = { role: 'student', id: t.studentId, display: `${t.studentName} 同學`, roleName: '研究生' };
+        };
+
+        const logout = () => { currentUser.value = null; };
+
+        // 清除快取並還原
+        const forceResetCache = () => {
+          if (confirm('是否清除本地瀏覽器快取並還原預設資料？')) {
+            localStorage.clear();
+            judges.value = defaultJudges;
+            presentations.value = defaultPresentations;
+            selectedPresId.value = defaultPresentations[0].id;
+            currentUser.value = null;
+            alert('快取已清除還原！');
+          }
+        };
+
+        // 評審狀態計算
+        const currentJudge = computed(() => judges.value.find(j => j.id === currentUser.value?.id) || judges.value[0]);
+        const assignedPresentations = computed(() => presentations.value.filter(p => p.session === currentJudge.value?.session));
+        const activePresentation = computed(() => presentations.value.find(p => p.id === selectedPresId.value) || assignedPresentations.value[0] || null);
+        const isConflictOfInterest = computed(() => activePresentation.value?.advisor === currentJudge.value?.name);
+
+        const currentCommentsGrouped = computed(() => activePresentation.value?.type === 'ORAL' ? oralCommentsGrouped : posterCommentsGrouped);
+
+        const submissions = reactive({});
+        const scoreForm = reactive({ score_a: 85, score_b: 85, score_c: 80, tags: [], comment: '' });
+
+        const syncSubmissionData = () => {
+          if (!currentUser.value || currentUser.value.role !== 'judge' || !activePresentation.value) return;
+          const key = `${currentUser.value.id}_${activePresentation.value.id}`;
+          const ex = submissions[key];
+          if (ex) {
+            scoreForm.score_a = ex.score_a ?? 80;
+            scoreForm.score_b = ex.score_b ?? 80;
+            scoreForm.score_c = ex.score_c ?? 80;
+            scoreForm.tags = [...(ex.tags || [])];
+            scoreForm.comment = ex.comment || '';
+          } else {
+            scoreForm.score_a = 80;
+            scoreForm.score_b = 80;
+            scoreForm.score_c = 80;
+            scoreForm.tags = [];
+            scoreForm.comment = '';
+          }
+        };
+
+        watch([selectedPresId, currentUser], syncSubmissionData, { immediate: true });
+
+        // 計分公式[cite: 1]
+        const calcTotalScore = computed(() => {
+          if (!activePresentation.value) return '0.0';
+          if (activePresentation.value.type === 'ORAL') {
+            return (scoreForm.score_a * 0.70 + scoreForm.score_b * 0.30).toFixed(1);
+          } else {
+            return (scoreForm.score_a * 0.60 + scoreForm.score_b * 0.20 + scoreForm.score_c * 0.20).toFixed(1);
+          }
+        });
+
+        const toggleTag = (t) => {
+          const idx = scoreForm.tags.indexOf(t);
+          if (idx > -1) scoreForm.tags.splice(idx, 1);
+          else scoreForm.tags.push(t);
+        };
+
+        const saveScore = async (status) => {
+          if (isGlobalLocked.value) return alert('大會評分已經鎖定！');
+          if (!activePresentation.value) return;
+
+          const key = `${currentUser.value.id}_${activePresentation.value.id}`;
+          const payload = {
+            judge_id: currentUser.value.id,
+            judge_name: currentJudge.value.name,
+            presentation_id: activePresentation.value.id,
+            score_a: Number(scoreForm.score_a),
+            score_b: Number(scoreForm.score_b),
+            score_c: Number(scoreForm.score_c),
+            weighted_total: Number(calcTotalScore.value),
+            core_score: Number(scoreForm.score_a),
+            tags: scoreForm.tags,
+            comment: scoreForm.comment,
+            status: status,
+            updated_at: new Date()
+          };
+
+          submissions[key] = payload;
+
+          if (db) {
+            try {
+              await db.collection('submissions').doc(key).set(payload, { merge: true });
+            } catch (err) {
+              console.error(err);
+            }
+          }
+          alert(status === 'SUBMITTED' ? `評分已正式提交！得分：${calcTotalScore.value}` : '草稿暫存完成！');
+        };
+
+        // 即時雙評審平均演算法
+        const rankedList = computed(() => {
+          const list = presentations.value.map(p => {
+            let total = 0, count = 0, core = 0;
+            judges.value.forEach(j => {
+              if (p.advisor === j.name) return; // 利益迴避
+              const sub = submissions[`${j.id}_${p.id}`];
+              if (sub && sub.status === 'SUBMITTED') {
+                total += sub.weighted_total;
+                core += sub.core_score;
+                count++;
+              }
+            });
+            return {
+              ...p,
+              completedJudges: count,
+              finalAverageScore: count > 0 ? (total / count) : 0,
+              coreScore: count > 0 ? (core / count) : 0
+            };
+          });
+
+          list.sort((a, b) => b.finalAverageScore - a.finalAverageScore || b.coreScore - a.coreScore);
+          list.forEach((item, idx) => item.rank = idx + 1);
+          return list;
+        });
+
+        // 學生查分成果
+        const studentResult = computed(() => {
+          if (currentUser.value?.role !== 'student') return null;
+          const info = rankedList.value.find(p => p.studentId === currentUser.value.id);
+          if (!info) return null;
+
+          const evList = [];
+          judges.value.forEach(j => {
+            const sub = submissions[`${j.id}_${info.id}`];
+            if (sub && sub.status === 'SUBMITTED') {
+              evList.push({ tags: sub.tags || [], comment: sub.comment || '' });
+            }
+          });
+          return { ...info, evaluations: evList };
+        });
+
+        // 管理員功能
+        const toggleGlobalLock = async () => {
+          isGlobalLocked.value = !isGlobalLocked.value;
+          if (db) {
+            await db.collection('configs').doc('system').set({ is_locked: isGlobalLocked.value }, { merge: true });
+          }
+          alert(isGlobalLocked.value ? '大會評分已結算鎖定！' : '大會評分已解除鎖定。');
+        };
+
+        const exportCSV = () => {
+          let csv = '名次,場次,學號,姓名,指導教授,論文題目,形式,加權平均總分,核心指標分\n';
+          rankedList.value.forEach(r => {
+            csv += `"${r.rank}","${r.session}","${r.studentId}","${r.studentName}","${r.advisor}","${r.title}","${r.type}","${r.finalAverageScore.toFixed(2)}","${r.coreScore.toFixed(2)}"\n`;
+          });
+          const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);
+          link.download = `研討會即時排名彙整總表_${new Date().toISOString().slice(0,10)}.csv`;
+          link.click();
+        };
+
+        const resetAllSubmissions = async () => {
+          if (prompt('請輸入 RESET-2027 確認清空全場分數：') === 'RESET-2027') {
+            Object.keys(submissions).forEach(k => delete submissions[k]);
+            if (db) {
+              const snap = await db.collection('submissions').get();
+              const batch = db.batch();
+              snap.forEach(doc => batch.delete(doc.ref));
+              await batch.commit();
+            }
+            syncSubmissionData();
+            alert('全場評分紀錄已清空重置！');
+          }
+        };
+
+        // ==========================================
+        // 🚀 Excel 檔案上傳解析功能 (SheetJS)
+        // ==========================================
+
+        // 1. 上傳《評審名單.xlsx》[cite: 2]
+        const handleJudgesExcelUpload = (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+
+          isUploading.value = true;
+          const reader = new FileReader();
+          reader.onload = async (evt) => {
+            try {
+              const data = new Uint8Array(evt.target.result);
+              const workbook = XLSX.read(data, { type: 'array' });
+              const sheetName = workbook.SheetNames[0];
+              const worksheet = workbook.Sheets[sheetName];
+              const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+              if (jsonData.length === 0) {
+                alert('上傳的 Excel 檔案內無有效資料！');
+                isUploading.value = false;
+                return;
+              }
+
+              // 對應欄位：場次、評審姓名、評審人員代號[cite: 2]
+              const parsedJudges = jsonData.map((row, idx) => ({
+                id: idx + 1,
+                session: String(row['場次'] || 'A1').trim(),
+                name: String(row['評審姓名'] || `評審${idx+1}`).trim(),
+                code: String(row['評審人員代號'] || `J0${idx+1}`).trim(),
+                password: String(row['密碼'] || '1234').trim()
+              })).filter(j => j.name && j.code);
+
+              if (parsedJudges.length > 0) {
+                judges.value = parsedJudges;
+                localStorage.setItem('cme_j_2027', JSON.stringify(parsedJudges));
+
+                // 同步寫入 Firebase 雲端
+                if (db) {
+                  await db.collection('configs').doc('judges_data').set({ list: parsedJudges });
+                }
+
+                alert(`成功上傳並解析 ${parsedJudges.length} 位評審，已同步至雲端！`);
+              } else {
+                alert('無法辨識評審資料，請確認欄位包含「場次」、「評審姓名」、「評審人員代號」！');
+              }
+            } catch (err) {
+              console.error(err);
+              alert('Excel 檔案解析失敗，請確認檔案格式是否正確。');
+            } finally {
+              isUploading.value = false;
+              e.target.value = ''; // 清除檔案選擇
+            }
+          };
+          reader.readAsArrayBuffer(file);
+        };
+
+        // 2. 上傳《學生名單.xlsx》[cite: 2]
+        const handleStudentsExcelUpload = (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+
+          isUploading.value = true;
+          const reader = new FileReader();
+          reader.onload = async (evt) => {
+            try {
+              const data = new Uint8Array(evt.target.result);
+              const workbook = XLSX.read(data, { type: 'array' });
+              const sheetName = workbook.SheetNames[0];
+              const worksheet = workbook.Sheets[sheetName];
+              const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+              if (jsonData.length === 0) {
+                alert('上傳的 Excel 檔案內無有效資料！');
+                isUploading.value = false;
+                return;
+              }
+
+              // 對應欄位：學號 (ID)、學生姓名、指導教授、論文題目、場次[cite: 2]
+              const parsedStudents = jsonData.map((row, idx) => {
+                const sessionName = String(row['場次'] || 'A1').trim();
+                let presType = String(row['形式'] || '').trim().toUpperCase();
+                // 若無形式欄位，依場次名稱自動判定（如含 P 或海報字樣判定為 POSTER）
+                if (!presType) {
+                  presType = sessionName.includes('P') || sessionName.includes('海報') ? 'POSTER' : 'ORAL';
+                }
+
+                return {
+                  id: idx + 1,
+                  studentId: String(row['學號 (ID)'] || row['學號'] || `M${1120000+idx}`).trim(),
+                  studentName: String(row['學生姓名'] || row['姓名'] || '').trim(),
+                  advisor: String(row['指導教授'] || '').trim(),
+                  title: String(row['論文題目'] || row['題目'] || '').trim(),
+                  type: presType,
+                  session: sessionName
+                };
+              }).filter(s => s.studentId && s.studentName);
+
+              if (parsedStudents.length > 0) {
+                presentations.value = parsedStudents;
+                selectedPresId.value = parsedStudents[0].id;
+                localStorage.setItem('cme_p_2027', JSON.stringify(parsedStudents));
+
+                // 同步寫入 Firebase 雲端
+                if (db) {
+                  await db.collection('configs').doc('presentations_data').set({ list: parsedStudents });
+                }
+
+                alert(`成功上傳並解析 ${parsedStudents.length} 位發表學生，已同步至雲端！`);
+              } else {
+                alert('無法辨識學生資料，請確認欄位包含「學號 (ID)」、「學生姓名」、「指導教授」、「論文題目」、「場次」！');
+              }
+            } catch (err) {
+              console.error(err);
+              alert('Excel 檔案解析失敗，請確認檔案格式是否正確。');
+            } finally {
+              isUploading.value = false;
+              e.target.value = ''; // 清除檔案選擇
+            }
+          };
+          reader.readAsArrayBuffer(file);
+        };
+
+        // Firestore 監聽：評分紀錄、全域鎖定、學生名單、評審名單
+        onMounted(() => {
+          if (db) {
+            // 監聽評分紀錄
+            db.collection('submissions').onSnapshot((snap) => {
+              snap.forEach(d => submissions[d.id] = d.data());
+            });
+
+            // 監聽大會鎖定狀態
+            db.collection('configs').doc('system').onSnapshot((d) => {
+              if (d.exists) isGlobalLocked.value = d.data().is_locked;
+            });
+
+            // 監聽並自動載入雲端的評審名單
+            db.collection('configs').doc('judges_data').onSnapshot((d) => {
+              if (d.exists && d.data().list) {
+                judges.value = d.data().list;
+              }
+            });
+
+            // 監聽並自動載入雲端的學生名單
+            db.collection('configs').doc('presentations_data').onSnapshot((d) => {
+              if (d.exists && d.data().list) {
+                presentations.value = d.data().list;
+                if (!presentations.value.some(p => p.id === selectedPresId.value)) {
+                  selectedPresId.value = d.data().list[0]?.id || 1;
+                }
+              }
+            });
+          }
+        });
+
+        return {
+          currentUser, loginTab, judgeCodeInput, judgePassInput, adminKeyInput, studentIdInput,
+          doJudgeLogin, doAdminLogin, doStudentLogin, logout, forceResetCache,
+          isGlobalLocked, importTab, isUploading, judges, presentations, selectedPresId,
+          currentJudge, assignedPresentations, activePresentation, isConflictOfInterest,
+          currentCommentsGrouped, scoreForm, calcTotalScore, toggleTag, saveScore,
+          rankedList, studentResult, toggleGlobalLock, exportCSV, resetAllSubmissions,
+          handleJudgesExcelUpload, handleStudentsExcelUpload
+        };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>
